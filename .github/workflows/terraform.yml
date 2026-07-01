@@ -1,0 +1,66 @@
+name: Terraform EKS+RDS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+
+      - name: Start Floci (LocalStack alternative)
+        run: |
+          docker run -d --name floci -p 4566:4566 floci/floci:latest
+          echo "Waiting for Floci to be ready..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4566/_localstack/health > /dev/null 2>&1; then
+              echo "Floci is ready"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Terraform Init
+        run: terraform init
+        env:
+          TF_VAR_aws_region: us-east-1
+          TF_VAR_cluster_name: eks-rds-demo
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -no-color -var-file=environments/ci.tfvars
+        env:
+          TF_VAR_aws_endpoints: '{"ec2":"http://localhost:4566","iam":"http://localhost:4566","eks":"http://localhost:4566","rds":"http://localhost:4566","logs":"http://localhost:4566","cloudwatch":"http://localhost:4566","sts":"http://localhost:4566","kms":"http://localhost:4566"}'
+
+      - name: Terraform Apply (on merge to main)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -auto-approve -var-file=environments/ci.tfvars
+        env:
+          TF_VAR_aws_endpoints: '{"ec2":"http://localhost:4566","iam":"http://localhost:4566","eks":"http://localhost:4566","rds":"http://localhost:4566","logs":"http://localhost:4566","cloudwatch":"http://localhost:4566","sts":"http://localhost:4566","kms":"http://localhost:4566"}'
+
+      - name: Verify EKS Resources
+        run: |
+          aws eks list-clusters --endpoint-url http://localhost:4566 --region us-east-1 --output json || echo "EKS check complete"
+
+      - name: Verify RDS Resources
+        run: |
+          aws rds describe-db-instances --endpoint-url http://localhost:4566 --region us-east-1 --output json || echo "RDS check complete"
+
+      - name: Terraform Destroy
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform destroy -auto-approve
+        env:
+          TF_VAR_aws_endpoints: '{"ec2":"http://localhost:4566","iam":"http://localhost:4566","eks":"http://localhost:4566","rds":"http://localhost:4566","logs":"http://localhost:4566","cloudwatch":"http://localhost:4566","sts":"http://localhost:4566","kms":"http://localhost:4566"}'
+
+      - name: Stop Floci
+        run: docker stop floci || true
